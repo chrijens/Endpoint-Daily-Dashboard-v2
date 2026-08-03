@@ -34,18 +34,61 @@ from email.utils import parsedate_to_datetime
 
 ROADMAP_API = "https://www.microsoft.com/releasecommunications/api/v1/m365"
 
-# Add or remove feeds freely. Anything that fails is skipped, not fatal.
-NEWS_FEEDS = [
-    ("Official Microsoft Blog", "https://blogs.microsoft.com/feed/"),
-    ("Microsoft 365 Blog", "https://www.microsoft.com/en-us/microsoft-365/blog/feed/"),
-    ("Microsoft Security", "https://www.microsoft.com/en-us/security/blog/feed/"),
+# Roadmap product tags to keep. Empty list = show everything.
+# These strings must match Microsoft's own tag names exactly. The ones below
+# are taken from the roadmap site's Product filter list.
+PRODUCT_FILTER = [
+    "Microsoft Intune",
+    "Microsoft Entra",
+    "Azure Active Directory",
+    "Microsoft Defender for Endpoint",
+    "Microsoft 365 admin center",
 ]
 
-# Only show roadmap items tagged with these products. Empty list = show all.
-PRODUCT_FILTER = []          # e.g. ["Microsoft Teams", "SharePoint", "Outlook"]
+# Feeds, grouped by the column they appear in.
+#
+# CONFIDENCE column meanings:
+#   verified  - the URL pattern is documented or was confirmed working
+#   candidate - the pattern is right but the exact id/path is a best guess
+#
+# Run `python3 ms_watch.py --check-feeds` to test every URL and prune the
+# dead ones. Anything that fails is skipped at build time, never fatal.
+FEEDS = [
+    # --- Microsoft: endpoint and identity -------------------------------
+    ("Windows Insider", "https://blogs.windows.com/windows-insider/feed/",
+     "Endpoint & identity"),
+    ("Microsoft Security", "https://www.microsoft.com/en-us/security/blog/feed/",
+     "Endpoint & identity"),
+    # Microsoft Learn docs-change feeds. The search API builds an RSS feed from
+    # any query - the only real option for products with no blog, like ConfigMgr.
+    ("Intune docs", "https://learn.microsoft.com/api/search/rss"
+                    "?search=Intune+what%27s+new&locale=en-us", "Endpoint & identity"),
+    ("Entra docs", "https://learn.microsoft.com/api/search/rss"
+                   "?search=Microsoft+Entra+what%27s+new&locale=en-us", "Endpoint & identity"),
+    ("ConfigMgr docs", "https://learn.microsoft.com/api/search/rss"
+                       "?search=Configuration+Manager+what%27s+new&locale=en-us",
+     "Endpoint & identity"),
+    ("Windows release health", "https://learn.microsoft.com/api/search/rss"
+                               "?search=Windows+release+health&locale=en-us",
+     "Endpoint & identity"),
+
+    # --- Third-party service status --------------------------------------
+    # NOTE: these are Statuspage incident histories, not release notes. They
+    # tell you when Zoom or TeamViewer is broken, not what shipped in 15.80.
+    ("Zoom status", "https://www.zoomstatus.com/history.rss", "Third-party status"),
+    ("TeamViewer status", "https://status.teamviewer.com/history.rss",
+     "Third-party status"),
+
+    # --- Community and company news --------------------------------------
+    ("4sysops", "https://4sysops.com/feed/", "Community & news"),
+    ("Official Microsoft Blog", "https://blogs.microsoft.com/feed/", "Community & news"),
+]
+
+# Column order in the right-hand rail.
+CATEGORIES = ["Endpoint & identity", "Third-party status", "Community & news"]
 
 MAX_ROADMAP_ITEMS = 60
-MAX_NEWS_ITEMS = 25
+MAX_NEWS_ITEMS = 20          # per category
 STATE_FILE = os.path.expanduser("~/.ms_watch_state.json")
 USER_AGENT = "Mozilla/5.0 (compatible; MSWatchDashboard/1.0)"
 TIMEOUT = 30
@@ -113,6 +156,19 @@ def parse_date(value):
     return None
 
 
+def matches_filter(products):
+    """Loose, case-insensitive match. Microsoft renames tags often - 'Microsoft
+    Entra' became 'Microsoft Entra ID' - so substring matching in either
+    direction avoids silently dropping everything after a rename."""
+    for product in products:
+        p = product.lower()
+        for wanted in PRODUCT_FILTER:
+            w = wanted.lower()
+            if w in p or p in w:
+                return True
+    return False
+
+
 def normalize_status(raw):
     s = (raw or "").strip().lower()
     if "rolling" in s:
@@ -145,7 +201,7 @@ def fetch_roadmap():
         products = [p for p in products if p]
         platforms = [p for p in platforms if p]
 
-        if PRODUCT_FILTER and not any(p in PRODUCT_FILTER for p in products):
+        if PRODUCT_FILTER and not matches_filter(products):
             continue
 
         feature_id = str(ci_get(entry, "id", "featureId", default="")).strip()
@@ -220,16 +276,21 @@ def gather():
         roadmap = []
         problems.append(("Microsoft 365 roadmap", str(exc)))
 
-    news = []
-    for name, url in NEWS_FEEDS:
+    by_category = {c: [] for c in CATEGORIES}
+    for name, url, category in FEEDS:
         try:
-            news.extend(fetch_news_feed(name, url))
+            entries = fetch_news_feed(name, url)
         except (urllib.error.URLError, ET.ParseError, ValueError, OSError) as exc:
             problems.append((name, str(exc)))
+            continue
+        by_category.setdefault(category, []).extend(entries)
 
-    news.sort(key=lambda i: i["published"] or datetime.min.replace(tzinfo=timezone.utc),
-              reverse=True)
-    return roadmap, news[:MAX_NEWS_ITEMS], problems
+    for category, entries in by_category.items():
+        entries.sort(key=lambda i: i["published"] or datetime.min.replace(tzinfo=timezone.utc),
+                     reverse=True)
+        by_category[category] = entries[:MAX_NEWS_ITEMS]
+
+    return roadmap, by_category, problems
 
 
 # ---------------------------------------------------------------------------
@@ -421,6 +482,15 @@ body {
   background: var(--paper); color: var(--ink-soft);
 }
 
+.rail-head {
+  display: flex; align-items: baseline; justify-content: space-between;
+  font-family: "Bricolage Grotesque", sans-serif; font-size: 12px;
+  text-transform: uppercase; letter-spacing: 0.1em; font-weight: 700;
+  margin: 26px 0 4px; padding-bottom: 6px; border-bottom: 2px solid var(--ink);
+}
+.rail-head:first-of-type { margin-top: 0; }
+.rail-count { font-family: "DM Mono", monospace; font-weight: 400; color: var(--ink-soft); }
+
 .news-item { padding: 14px 0; border-bottom: 1px solid var(--line); }
 .news-item:first-child { padding-top: 0; }
 .news-item .src {
@@ -482,11 +552,12 @@ search.addEventListener('input', apply);
 """
 
 
-def render(roadmap, news, problems, refresh_minutes=None):
+def render(roadmap, news_by_category, problems, refresh_minutes=None):
     counts = {s: sum(1 for i in roadmap if i["status"] == s) for s in STATUS_ORDER}
     total = sum(counts.values()) or 1
+    flat_news = [i for c in CATEGORIES for i in news_by_category.get(c, [])]
     new_count = sum(1 for i in roadmap if i.get("is_new")) + \
-        sum(1 for i in news if i.get("is_new"))
+        sum(1 for i in flat_news if i.get("is_new"))
 
     seg_class = {"Rolling out": "seg-rolling", "In development": "seg-dev",
                  "Launched": "seg-launched"}
@@ -540,16 +611,20 @@ def render(roadmap, news, problems, refresh_minutes=None):
                             'Check the connection or the product filter in the script.</p>')
 
     news_html = []
-    for item in news:
-        badge = ' <span class="badge-new">New</span>' if item.get("is_new") else ""
-        news_html.append(f"""    <article class="news-item">
+    for category in CATEGORIES:
+        entries = news_by_category.get(category, [])
+        news_html.append(f'    <h3 class="rail-head">{e(category)}'
+                         f'<span class="rail-count">{len(entries)}</span></h3>')
+        if not entries:
+            news_html.append('    <p class="empty">Nothing loaded for this group.</p>')
+            continue
+        for item in entries:
+            badge = ' <span class="badge-new">New</span>' if item.get("is_new") else ""
+            news_html.append(f"""    <article class="news-item">
       <div class="src">{e(item['source'])}{badge}</div>
       <h4><a href="{e(item['link'])}" target="_blank" rel="noopener">{e(item['title'])}</a></h4>
       <div class="when">{e(fmt_date(item['published']))} · {e(relative(item['published']))}</div>
     </article>""")
-
-    if not news_html:
-        news_html.append('<p class="empty">No news items loaded.</p>')
 
     notice = ""
     if problems:
@@ -606,13 +681,13 @@ def render(roadmap, news, problems, refresh_minutes=None):
     </section>
 
     <aside>
-      <div class="section-head"><h2>Company news</h2></div>
+      <div class="section-head"><h2>Release feeds</h2></div>
 {chr(10).join(news_html)}
     </aside>
   </div>
 
-  <footer>Sources: Microsoft 365 public roadmap API ·
-  {e(' · '.join(name for name, _ in NEWS_FEEDS))}</footer>
+  <footer>Microsoft 365 roadmap API · {len(FEEDS)} release feeds ·
+  filtered to {e(', '.join(PRODUCT_FILTER)) if PRODUCT_FILTER else 'all products'}</footer>
 </div>
 <script>{JS}</script>
 </body>
@@ -672,20 +747,40 @@ def demo_data():
          "modified": now - timedelta(days=1),
          "link": "https://www.microsoft.com/microsoft-365/roadmap?id=561200", "is_new": False},
     ]
-    news = [
-        {"id": "n1", "title": "Sample: quarterly earnings and cloud growth",
-         "summary": "", "link": "https://blogs.microsoft.com/",
-         "source": "Official Microsoft Blog", "published": now - timedelta(hours=9),
-         "is_new": True},
-        {"id": "n2", "title": "Sample: new security defaults for tenants",
-         "summary": "", "link": "https://www.microsoft.com/en-us/security/blog/",
-         "source": "Microsoft Security", "published": now - timedelta(days=3),
-         "is_new": False},
-        {"id": "n3", "title": "Sample: Copilot updates for frontline workers",
-         "summary": "", "link": "https://www.microsoft.com/en-us/microsoft-365/blog/",
-         "source": "Microsoft 365 Blog", "published": now - timedelta(days=6),
-         "is_new": False},
-    ]
+    news = {
+        "Endpoint & identity": [
+            {"id": "e1", "title": "Sample: What's new in Microsoft Intune - July",
+             "summary": "", "link": "https://techcommunity.microsoft.com/",
+             "source": "Intune Blog", "published": now - timedelta(hours=9), "is_new": True},
+            {"id": "e2", "title": "Sample: Windows 11 servicing update and KMS attestation",
+             "summary": "", "link": "https://techcommunity.microsoft.com/",
+             "source": "Windows IT Pro", "published": now - timedelta(days=2), "is_new": True},
+            {"id": "e3", "title": "Sample: Entra conditional access policy changes",
+             "summary": "", "link": "https://techcommunity.microsoft.com/",
+             "source": "Entra / Identity", "published": now - timedelta(days=4), "is_new": False},
+            {"id": "e4", "title": "Sample: Configuration Manager 2603 documentation update",
+             "summary": "", "link": "https://learn.microsoft.com/",
+             "source": "ConfigMgr docs", "published": now - timedelta(days=8), "is_new": False},
+        ],
+        "Third-party status": [
+            {"id": "t1", "title": "Sample: Zoom - degraded performance for meeting recordings",
+             "summary": "", "link": "https://www.zoomstatus.com/",
+             "source": "Zoom status", "published": now - timedelta(days=1), "is_new": True},
+            {"id": "t2", "title": "Sample: TeamViewer - scheduled maintenance on EU routers",
+             "summary": "", "link": "https://status.teamviewer.com/",
+             "source": "TeamViewer status", "published": now - timedelta(days=5),
+             "is_new": False},
+        ],
+        "Community & news": [
+            {"id": "c1", "title": "Sample: Restrict Active Directory account logon hours",
+             "summary": "", "link": "https://4sysops.com/",
+             "source": "4sysops", "published": now - timedelta(hours=14), "is_new": True},
+            {"id": "n1", "title": "Sample: quarterly earnings and cloud growth",
+             "summary": "", "link": "https://blogs.microsoft.com/",
+             "source": "Official Microsoft Blog", "published": now - timedelta(hours=20),
+             "is_new": False},
+        ],
+    }
     return roadmap, news, []
 
 
@@ -695,25 +790,68 @@ def demo_data():
 
 def build(output, refresh_minutes=None, demo=False):
     if demo:
-        roadmap, news, problems = demo_data()
+        roadmap, news_by_category, problems = demo_data()
     else:
-        roadmap, news, problems = gather()
+        roadmap, news_by_category, problems = gather()
         previous = load_state()
-        roadmap, news = mark_new(roadmap, news, previous)
-        save_state(roadmap, news, previous)
+        # mark_new mutates the item dicts, which the category lists still hold.
+        flat = [i for c in CATEGORIES for i in news_by_category.get(c, [])]
+        roadmap, flat = mark_new(roadmap, flat, previous)
+        save_state(roadmap, flat, previous)
 
-    page = render(roadmap, news, problems, refresh_minutes)
+    page = render(roadmap, news_by_category, problems, refresh_minutes)
     with open(output, "w", encoding="utf-8") as fh:
         fh.write(page)
 
+    news_total = sum(len(v) for v in news_by_category.values())
     stamp = datetime.now().strftime("%H:%M:%S")
     print(f"[{stamp}] wrote {output} — "
-          f"{len(roadmap)} roadmap items, {len(news)} news items"
+          f"{len(roadmap)} roadmap items, {news_total} feed items"
           + (f", {len(problems)} source(s) failed" if problems else ""))
     for name, msg in problems:
         print(f"    ! {name}: {truncate(msg, 120)}", file=sys.stderr)
 
-    return bool(roadmap or news)
+    return bool(roadmap or news_total)
+
+
+def check_feeds():
+    """Test every configured feed and report which ones actually work.
+
+    Several vendors here publish no official RSS, so the shipped URLs are
+    educated guesses. This tells you which to keep in about ten seconds.
+    """
+    print(f"Testing {len(FEEDS) + 1} sources\n")
+    width = max([len(n) for n, _, _ in FEEDS] + [len("M365 roadmap")]) + 2
+    ok = dead = 0
+
+    try:
+        items = fetch_roadmap()
+        print(f"  PASS  {'M365 roadmap'.ljust(width)} {len(items)} items after product filter")
+        if not items:
+            print(f"        {''.ljust(width)} check PRODUCT_FILTER - tag names may have changed")
+        ok += 1
+    except Exception as exc:
+        print(f"  FAIL  {'M365 roadmap'.ljust(width)} {truncate(str(exc), 60)}")
+        dead += 1
+
+    for name, url, category in FEEDS:
+        try:
+            entries = fetch_news_feed(name, url)
+            if entries:
+                newest = fmt_date(entries[0]["published"])
+                print(f"  PASS  {name.ljust(width)} {len(entries)} items, newest {newest}")
+                ok += 1
+            else:
+                print(f"  EMPTY {name.ljust(width)} parsed but returned nothing")
+                dead += 1
+        except Exception as exc:
+            print(f"  FAIL  {name.ljust(width)} {truncate(str(exc), 60)}")
+            dead += 1
+
+    print(f"\n{ok} working, {dead} to fix or remove.")
+    if dead:
+        print("Delete the failing lines from FEEDS, or correct the URL.")
+    return dead == 0
 
 
 def main():
@@ -730,9 +868,14 @@ def main():
                     help="keep running and rebuild every N minutes")
     ap.add_argument("--demo", action="store_true",
                     help="render with bundled sample data, no network needed")
+    ap.add_argument("--check-feeds", action="store_true",
+                    help="test every configured source and report which work")
     ap.add_argument("--strict", action="store_true",
                     help="exit non-zero if every source failed (useful in CI)")
     args = ap.parse_args()
+
+    if args.check_feeds:
+        sys.exit(0 if check_feeds() else 1)
 
     if args.state:
         STATE_FILE = os.path.expanduser(args.state)
